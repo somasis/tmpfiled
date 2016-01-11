@@ -1,8 +1,5 @@
 VERSION=scm
 
-CC?=cc
-CFLAGS?=-O2 -g
-
 DESTDIR?=$(PWD)/image
 BUILD?=$(PWD)/build
 
@@ -20,7 +17,7 @@ localstatedir?=$(prefix)/var
 runstatedir?=$(localstatedir)/run
 
 all:
-	@printf "tmpfiled, a standalone reimplementation of systemd-tmpfiles\n\n"
+	@printf "tmpfiled, an independent reimplementation of systemd-tmpfiles\n\n"
 	@printf "%-20s%-20s\n"	\
 		"DESTDIR"		"$(DESTDIR)"		\
 		"BUILD"			"$(BUILD)"			\
@@ -42,10 +39,7 @@ all:
 build:
 	mkdir -p $(BUILD)
 	mkdir -p $(BUILD)$(bindir)
-	mkdir -p $(BUILD)$(libdir)/tmpfiles.d
-	mkdir -p $(BUILD)$(sysconfdir)/tmpfiles.d
-	mkdir -p $(BUILD)$(docdir)
-	install -m755 tmpfiled $(BUILD)$(bindir)
+	cp -r bin/* $(BUILD)$(bindir)
 	find $(BUILD) -type f -exec sed \
 		-e "s|@@prefix@@|$(prefix)|g"				\
 		-e "s|@@exec_prefix@@|$(exec_prefix)|g"		\
@@ -59,8 +53,18 @@ build:
 		-e "s|@@mandir@@|$(mandir)|g"				\
 		-e "s|@@localstatedir@@|$(localstatedir)|g"	\
 		-e "s|@@runstatedir@@|$(runstatedir)|g"		\
-		-e "s|@@COPYRIGHT@@|$(copyright)|g"			\
+		-e "s|@@VERSION@@|$(VERSION)|g"				\
 		-i {} \;
+	@echo
+	@for file in $$(grep -lr '^\#!/bin/bash' $(BUILD));do \
+		bash -n "$$file"; \
+		if [[ $$? -eq 0 ]];then \
+			echo "SYNTAX PASS: $$file"; \
+		else \
+			echo "SYNTAX FAIL: $$file";	\
+			exit 2; \
+		fi; \
+	done
 
 install: $(BUILD)
 	mkdir -p $(DESTDIR)

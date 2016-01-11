@@ -1,5 +1,5 @@
 #!/bin/bash
-# tmpfiled 0.1
+# tmpfiled @@VERSION@@
 #
 # Copyright (c) 2016 Kylie McClain <somasis@exherbo.org>
 #
@@ -19,41 +19,51 @@
 # http://www.freedesktop.org/software/systemd/man/tmpfiles.d.html
 # as of systemd 228
 
-user_tmpfilesd="@@sysconfdir@@"/tmpfiles.d
-run_tmpfilesd="@@runstatedir@@"/tmpfiles.d
-sys_tmpfilesd="@@libdir@@"/tmpfiles.d
+me=tmpfiled
+version="@@VERSION@@"
+
+# user files override run files, run files override sys files
+user_tmpfilesd="${root}""@@sysconfdir@@"/tmpfiles.d
+run_tmpfilesd="${root}""@@runstatedir@@"/tmpfiles.d
+sys_tmpfilesd="${root}""@@libdir@@"/tmpfiles.d
 
 conffiles=()
 basefiles=()
-files=( ${sys_tmpfilesd}/* ${run_tmpfilesd}/* ${user_tmpfilesd}/* )
+files=( "${sys_tmpfilesd}"/* "${run_tmpfilesd}"/* "${user_tmpfilesd}"/* )
 
-echo "${files[*]}"
+help() {
+    cat <<EOF
+${me} [OPTIONS...] [CONFIGURATION FILE...]
 
-# user files override run files, run files override sys files
+Creates, deletes and cleans up volatile and temporary files and directories.
 
-for f in ${files[@]};do
-    f="${f##*/}"
-    basefiles+=( "${f}" )
-done
+    --help                  Show this help
+    --version               Show package version
+    --create                Create marked files/directories
+    --clean                 Clean up marked directories
+    --remove                Remove marked files/directories
+    --boot                  Execute actions on safe at boot
+    --prefix=PATH           Only apply rules with the specified prefix
+    --exclude-prefix=PATH   Ignore rules with the specified prefix
+    --root=PATH             Operate on an alternate filesystem root
+EOF
+}
 
-for f in ${basefiles[@]};do
-    for d in "${user_tmpfilesd}" "${run_tmpfilesd}" "${sys_tmpfilesd}";do
-        [[ -r "${d}"/"${f}" ]] && conffiles+=( "${d}"/"${f}" )
-    done
-done
-
-echo "${conffiles[*]}"
+version() {
+    echo ${me} ${version}
+}
 
 machine_id() {
     if [[ -f "@@sysconfdir@@"/machine-id ]];then
         cat "@@sysconfdir@@"/machine-id
-    else
+    elif type -fPp dbus-uuidgen >/dev/null 2>&1;then
         dbus-uuidgen --get 2>/dev/null
     fi
 }
 
 mode() {
     local path="${1}" mode="${2}" uid="${3}" gid="${4}"
+    [[ -e "${path}" ]] || return 1
     [[ -z "${mode}" ]] && mode=0644
     [[ -z "${mode}" && -d "${path}" ]] && mode=0755
     [[ -z "${uid}" ]] || chown "${uid}" "${path}"
@@ -61,8 +71,89 @@ mode() {
     chmod "${mode}" "${path}"
 }
 
+do_create() {
+    local t="${1}" p="${2}" m="${3}" u="${4}" g="${5}" ag="${6}" ar="${7}"
+    # lines with exclaimation marks should only be executed with --boot
+    [[ "${t}" == "!"* && -z "${boot}" ]] && return 1
+
+    case "${t}" in
+        f)
+            touch -h "${p}"
+            mode "${p}" "${m}"
+        ;;
+        F)
+            : > "${p}"
+            mode "${p}" "${m}" "${u}" "${g}"
+        ;;
+        w)
+            printf '%s' "${ar}" > "${p}"
+            mode "${p}" "${m}" "${u}" "${g}"
+        ;;
+        d)
+            mkdir -p "${p}"
+            mode "${p}" "${m}" "${u}" "${g}"
+        ;;
+        D)
+            mkdir -p "${p}"
+            mode "${p}" "${m}" "${u}" "${g}"
+        ;;
+        p)
+            mkfifo "${p}"
+            mode "${p}" "${m}" "${u}" "${g}"
+        ;;
+        L)
+            if [[ -z "${ar}" ]];then
+                ln -fs "@@datarootdir@@"/factory/"${p##*/}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            else
+                ln -fs "${ar}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        c)  :   ;;
+        b)  :   ;;
+        z)  :   ;;
+        Z)  :   ;;
+        t)  :   ;;
+        T)  :   ;;
+        a)  :   ;;
+        A)  :   ;;
+    esac
+}
+
+do_clean() {
+    local t="${1}" p="${2}" m="${3}" u="${4}" g="${5}" ag="${6}" ar="${7}"
+    # lines with exclaimation marks should only be executed with --boot
+    [[ "${t}" == "!"* && -z "${boot}" ]] && return 1
+
+    if [[ -n "${ag}" ]];then
+        rm -rf "${p}"
+    fi
+}
+
+do_remove() {
+    local t="${1}" p="${2}" m="${3}" u="${4}" g="${5}" ag="${6}" ar="${7}"
+    # lines with exclaimation marks should only be executed with --boot
+    [[ "${t}" == "!"* && -z "${boot}" ]] && return 1
+
+    case "${t}" in
+        D)
+            rm -rf "${p}"/*
+        ;;
+        r)
+            rm -rf "${p}"
+        ;;
+        R)
+            if [[ -d "${p}" ]];then
+                rm -rf "${p}"/*
+            fi
+        ;;
+    esac
+}
+
 do_act() {
     local t="${1}" p="${2}" m="${3}" u="${4}" g="${5}" ag="${6}" ar="${7}"
+    # lines with exclaimation marks should only be executed with --boot
     [[ "${t}" == "!"* && -z "${boot}" ]] && return 1
 
     if [[ -n "${ag}" ]];then
@@ -73,15 +164,27 @@ do_act() {
     fi
 
     case "${t}" in
-        f)  [[ -f "${p}" ]] || { touch -h "${p}" && mode "${p}" "${m}"; }  ;;
-        F)
-            if [[ -f "${p}" ]];then
-                : > "${p}" && mode "${p}" "${m}" "${u}" "${g}"
-            else
-                touch -h "${p}" && mode "${p}" "${m}" "${u}" "${g}"
+        f)
+            if [[ ! -f "${p}" ]];then
+                touch -h "${p}"
+                mode "${p}" "${m}"
             fi
         ;;
-        w)  [[ -e "${p}" ]] && printf '%s' "${ar}" > "${p}" && mode "${p}" "${m}" "${u}" "${g}" ;;
+        F)
+            if [[ -f "${p}" ]];then
+                : > "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            else
+                touch -h "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        w)
+            if [[ -e "${p}" ]];then
+                printf '%s' "${ar}" > "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
         d)
             if [[ -d "${p}" ]];then
                 mode "${p}" "${m}" "${u}" "${g}"
@@ -156,7 +259,6 @@ do_act() {
         A)  :   ;;
         A+) :   ;;
     esac
-    exit
 }
 
 get_time() {
@@ -200,9 +302,75 @@ parse_age() {
     echo $(( ${weeks} + ${days} + ${hours} + ${minutes} + ${seconds} + ${milliseconds} + ${microseconds} ))
 }
 
+for arg in "${@}";do
+    case "${arg}" in
+        /*|./*)
+            if [[ -f "${arg}" ]];then
+                basefiles=
+                files=
+                conffiles+=( "${arg}" )
+            else
+                echo "${me}: ${arg} is not a file" >&2
+                exit 2
+            fi
+        ;;
+        --create)
+            create=true
+        ;;
+        --clean)
+            clean=true
+        ;;
+        --remove)
+            remove=true
+        ;;
+        --boot)
+            boot=true
+        ;;
+        --prefix=*)
+            prefix="${arg#*=}"
+        ;;
+        --exclude-prefix=*)
+            exclude="${arg#*=}"
+        ;;
+        --root=*)
+            root="${arg#*=}"
+        ;;
+        --help|-h)
+            help
+            exit
+        ;;
+        --version)
+            version
+            exit
+        ;;
+        *)
+            files=
+            conffiles=
+            basefiles+=( "${arg}" )
+        ;;
+    esac
+done
+
+for f in ${files[@]};do
+    f="${f##*/}"
+    basefiles+=( "${f}" )
+done
+
+
+for f in ${basefiles[@]};do
+    for d in "${user_tmpfilesd}" "${run_tmpfilesd}" "${sys_tmpfilesd}";do
+        [[ -r "${d}"/"${f}" ]] && conffiles+=( "${d}"/"${f}" )
+    done
+done
+
+if [[ -z "${conffiles[@]}" ]];then
+    echo "${me}: did not find any configuration files" >&2
+    exit 3
+fi
+
 # parse configurations
 for f in ${conffiles[@]};do
-    echo "parsing ${f}"
+    echo "${me}: parsing ${f}" >&2
     while read line;do
         [[ "${line}" == '#'* ]] && continue
         type=$(echo "${line}" | awk '{ print $1 }')
@@ -221,20 +389,33 @@ for f in ${conffiles[@]};do
         [[ "${gid}" == '-' ]] && gid=
         [[ -z "${gid}" ]] && gid=0
         [[ "${age}" == '-' ]] && age=
-        [[ -z "${age}" ]] && age=0
         orig_age=${age}
         [[ -z "${age}" ]] || age=$(parse_age "$age")
         [[ "${arg}" == '-' ]] && arg=
-        printf '%-20s %-10s\n'  \
-            "type"  "${type}"   \
-            "path"  "${path}"   \
-            "mode"  "${mode}"   \
-            "uid"   "${uid}"    \
-            "gid"   "${gid}"    \
-            "age"   "${age}"    \
-            "arg"   "${arg}"    \
-            "original age"   "${orig_age}"    \
-            ""      ""
-        do_act "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+
+        if [[ "${prefix}" ]] && ! echo "${path}" | grep -q "^${prefix}";then
+            continue
+        fi
+        if [[ "${exclude}" ]] && echo "${path}" | grep -q "^${exclude}";then
+            continue
+        fi
+        path="${root}${path}"
+
+        #printf '%-20s %-10s\n'  \
+        #    "type"  "${type}"   \
+        #    "path"  "${path}"   \
+        #    "mode"  "${mode}"   \
+        #    "uid"   "${uid}"    \
+        #    "gid"   "${gid}"    \
+        #    "age"   "${age}"    \
+        #    "arg"   "${arg}"    \
+        #    "original age"   "${orig_age}"    \
+        #    ""      ""
+        [[ "${create}" ]] && do_create "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+        [[ "${clean}" ]] && do_clean "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+        [[ "${remove}" ]] && do_remove "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+        if [[ -z "${create}${clean}${remove}" ]];then
+            do_act "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+        fi
     done < "${f}"
 done
