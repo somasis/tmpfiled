@@ -1,0 +1,240 @@
+#!/bin/bash
+# tmpfiled 0.1
+#
+# Copyright (c) 2016 Kylie McClain <somasis@exherbo.org>
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# created based off the documentation at
+# http://www.freedesktop.org/software/systemd/man/tmpfiles.d.html
+# as of systemd 228
+
+user_tmpfilesd="@@sysconfdir@@"/tmpfiles.d
+run_tmpfilesd="@@runstatedir@@"/tmpfiles.d
+sys_tmpfilesd="@@libdir@@"/tmpfiles.d
+
+conffiles=()
+basefiles=()
+files=( ${sys_tmpfilesd}/* ${run_tmpfilesd}/* ${user_tmpfilesd}/* )
+
+echo "${files[*]}"
+
+# user files override run files, run files override sys files
+
+for f in ${files[@]};do
+    f="${f##*/}"
+    basefiles+=( "${f}" )
+done
+
+for f in ${basefiles[@]};do
+    for d in "${user_tmpfilesd}" "${run_tmpfilesd}" "${sys_tmpfilesd}";do
+        [[ -r "${d}"/"${f}" ]] && conffiles+=( "${d}"/"${f}" )
+    done
+done
+
+echo "${conffiles[*]}"
+
+machine_id() {
+    if [[ -f "@@sysconfdir@@"/machine-id ]];then
+        cat "@@sysconfdir@@"/machine-id
+    else
+        dbus-uuidgen --get 2>/dev/null
+    fi
+}
+
+mode() {
+    local path="${1}" mode="${2}" uid="${3}" gid="${4}"
+    [[ -z "${mode}" ]] && mode=0644
+    [[ -z "${mode}" && -d "${path}" ]] && mode=0755
+    [[ -z "${uid}" ]] || chown "${uid}" "${path}"
+    [[ -z "${gid}" ]] || chgrp "${gid}" "${path}"
+    chmod "${mode}" "${path}"
+}
+
+do_act() {
+    local t="${1}" p="${2}" m="${3}" u="${4}" g="${5}" ag="${6}" ar="${7}"
+    [[ "${t}" == "!"* && -z "${boot}" ]] && return 1
+
+    if [[ -n "${ag}" ]];then
+        # if current age is greater or equal to specified age
+        if [[ -e "${p}" && $(( $(date +%s) - $(date -r "${p}" +%s) )) -ge "${ag}" ]];then
+            rm -rf "${p}"
+        fi
+    fi
+
+    case "${t}" in
+        f)  [[ -f "${p}" ]] || { touch -h "${p}" && mode "${p}" "${m}"; }  ;;
+        F)
+            if [[ -f "${p}" ]];then
+                : > "${p}" && mode "${p}" "${m}" "${u}" "${g}"
+            else
+                touch -h "${p}" && mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        w)  [[ -e "${p}" ]] && printf '%s' "${ar}" > "${p}" && mode "${p}" "${m}" "${u}" "${g}" ;;
+        d)
+            if [[ -d "${p}" ]];then
+                mode "${p}" "${m}" "${u}" "${g}"
+            else
+                rm -rf "${p}"
+                mkdir -p "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        D)
+            if [[ -d "${p}" ]];then
+                mode "${p}" "${m}" "${u}" "${g}"
+                rm -rf "${p}"/*
+            else
+                mkdir -p "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        v)  :   ;;
+        q)  :   ;;
+        Q)  :   ;;
+        p)
+            if [[ -e "${p}" ]];then
+                mkfifo "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        p+)
+            if [[ -e "${p}" ]];then
+                rm -f "${p}"
+                mkfifo "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        L)
+            [[ -e "${p}" ]] && break
+            if [[ -z "${ar}" ]];then
+                ln -fs "@@datarootdir@@"/factory/"${p##*/}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            else
+                ln -fs "${ar}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        L+)
+            [[ -e "${p}" ]] && rm -f "${p}"
+            if [[ -z "${ar}" ]];then
+                ln -fs "@@datarootdir@@"/factory/"${p##*/}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            else
+                ln -fs "${ar}" "${p}"
+                mode "${p}" "${m}" "${u}" "${g}"
+            fi
+        ;;
+        c)  :   ;;
+        c+) :   ;;
+        b)  :   ;;
+        b+) :   ;;
+        C)  :   ;;
+        x)  :   ;;
+        X)  :   ;;
+        r)  :   ;;
+        R)  :   ;;
+        z)  :   ;;
+        Z)  :   ;;
+        t)  :   ;;
+        T)  :   ;;
+        h)  :   ;;
+        H)  :   ;;
+        a)  :   ;;
+        a+) :   ;;
+        A)  :   ;;
+        A+) :   ;;
+    esac
+    exit
+}
+
+get_time() {
+    sed -r '/([0-9]*?)'"${1}"'(.*)?/ !d; s/[A-z]//g'
+}
+
+parse_age() {
+    local age="$1" weeks days hours minutes seconds milliseconds microseconds
+    age=$(echo "${age}" | sed -r 's/sec(onds)?/s/g;s/min(utes)?/m/g;s/h(ou)?r?s?/h/g;s/day(s)/d/g;s/weeks?/w/g;s/milliseconds?/ms/g;s/microseconds?/us/g')
+    age=$(echo "${age}" | sed -r 's/([hdw]|ms|us|[ms])/&\n/g;s/[0-9]*[mu]s//')
+    if [[ "${age}" == "0" ]];then
+        return
+    fi
+    if [[ "${age}" == *w* ]];then
+        weeks=$(( $(echo "${age}" | get_time w) * 604800 ))
+    else
+        weeks=0
+    fi
+    if [[ "${age}" == *d* ]];then
+        days=$(( $(echo "${age}" | get_time d) * 86400 ))
+    else
+        days=0
+    fi
+    if [[ "${age}" == *h* ]];then
+        hours=$(( $(echo "${age}" | get_time h) * 3600 ))
+    else
+        hours=0
+    fi
+    if [[ "${age}" == *m* ]];then
+        minutes=$(( $(echo "${age}" | get_time m) * 60 ))
+    else
+        minutes=0
+    fi
+    if [[ "${age}" == *[0-9]s* ]];then
+        seconds=$(echo "${age}" | get_time s)
+    else
+        seconds=0
+    fi
+    milliseconds=0
+    microseconds=0
+    echo $(( ${weeks} + ${days} + ${hours} + ${minutes} + ${seconds} + ${milliseconds} + ${microseconds} ))
+}
+
+# parse configurations
+for f in ${conffiles[@]};do
+    echo "parsing ${f}"
+    while read line;do
+        [[ "${line}" == '#'* ]] && continue
+        type=$(echo "${line}" | awk '{ print $1 }')
+        path=$(echo "${line}" | awk '{ print $2 }')
+        path=$(echo "${path}" | sed "s|%%|/%/|g;s/%m/$(machine_id)/g;s/%b/$(cat /proc/sys/kernel/random/boot_id)/;s/%H/${HOSTNAME}/;s/%v/$(uname -r)/g;s|/%/|%|g")
+        mode=$(echo "${line}" | awk '{ print $3 }')
+        uid=$(echo "${line}" | awk '{ print $4 }')
+        gid=$(echo "${line}" | awk '{ print $5 }')
+        age=$(echo "${line}" | awk '{ print $6 }')
+        arg=$(echo "${line}" | awk '{ print $7 }')
+        [[ "${mode}" == '-' ]] && mode=
+        [[ -z "${mode}" && -e "${path}" ]] && mode=0644
+        [[ -z "${mode}" && -d "${path}" ]] && mode=0755
+        [[ "${uid}" == '-' ]] && uid=
+        [[ -z "${uid}" ]] && uid=0
+        [[ "${gid}" == '-' ]] && gid=
+        [[ -z "${gid}" ]] && gid=0
+        [[ "${age}" == '-' ]] && age=
+        [[ -z "${age}" ]] && age=0
+        orig_age=${age}
+        [[ -z "${age}" ]] || age=$(parse_age "$age")
+        [[ "${arg}" == '-' ]] && arg=
+        printf '%-20s %-10s\n'  \
+            "type"  "${type}"   \
+            "path"  "${path}"   \
+            "mode"  "${mode}"   \
+            "uid"   "${uid}"    \
+            "gid"   "${gid}"    \
+            "age"   "${age}"    \
+            "arg"   "${arg}"    \
+            "original age"   "${orig_age}"    \
+            ""      ""
+        do_act "${type}" "${path}" "${mode}" "${uid}" "${gid}" "${age}" "${arg}"
+    done < "${f}"
+done
